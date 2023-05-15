@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import styles from "@/styles/Landing.module.css";
-import { ApiPromise, WsProvider } from "@polkadot/api";
+import { ApiPromise, WsProvider, ApiRx } from "@polkadot/api";
 import { formatBalance } from "@polkadot/util";
 import { web3Enable, web3FromAddress } from "@polkadot/extension-dapp";
 import { toast } from "react-toastify";
-import useSwr from "swr";
+const { pairwise, startWith } = require("rxjs/operators");
 
 const Landing = () => {
   const [senderAddress, setSenderAddress] = useState("");
   const [receiverAddress, setReceiverAddress] = useState("");
   const [amount, setAmount] = useState("0");
+  const [balance, setBalance] = useState("");
 
   const [button, setButton] = useState({
     isLoading: false,
@@ -22,34 +23,50 @@ const Landing = () => {
     []
   );
 
-  const getBalance = async (senderAddr: string) => {
-    console.log(senderAddr);
-    if (senderAddr?.trim().length === 0) return;
-    const api = await ApiPromise.create({ provider: wsProvider });
+  const getBalance = useCallback(
+    async (senderAddr: string) => {
+      console.log(senderAddr);
+      if (senderAddr?.trim().length === 0) return;
 
-    // Retrieve the last timestamp
-    const now = await api.query.timestamp.now();
+      // Create an await for the API
+      const api = await ApiRx.create({ provider: wsProvider }).toPromise();
 
-    // Retrieve the account balance & nonce via the system module
-    const { nonce, data: balance } = await api.query.system.account(senderAddr);
-
-    const chainDecimals = api.registry.chainDecimals[0];
-
-    formatBalance.setDefaults({ unit: "DOT" });
-    const free = formatBalance(
-      balance.free,
-      { withSiFull: true },
-      chainDecimals
-    );
-
-    console.log(`${now}: balance of ${free} and a nonce of ${nonce}`);
-    return free;
-  };
-
-  const { data: balance } = useSwr(
-    "fetch-balance",
-    ({ sendAddr = senderAddress }: { sendAddr: string }) => getBalance(sendAddr)
+      // Here we subscribe to any balance changes and update the on-screen value.
+      // We're using RxJs pairwise() operator to get the previous and current values as an array.
+      api.query.system
+        .account(senderAddr)
+        .pipe(
+          // since pairwise only starts emitting values on the second emission, we prepend an
+          // initial value with the startWith() operator to be able to also receive the first value
+          startWith("first"),
+          pairwise()
+        )
+        .subscribe((balance: any) => {
+          if (balance[0] === "first") {
+            // Now we know that if the previous value emitted as balance[0] is `first`,
+            // then balance[1] is the initial value of Alice account.
+            const chainDecimals = api.registry.chainDecimals[0];
+            formatBalance.setDefaults({ unit: "DOT" });
+            const free = formatBalance(
+              balance[1].data.free,
+              { withSiFull: true },
+              chainDecimals
+            );
+            setBalance(free);
+            console.log(`${senderAddr} has a balance of ${free}`);
+            console.log(
+              'You may leave this example running and start the "Make a transfer" example or transfer any value to Alice address'
+            );
+            return;
+          }
+        });
+    },
+    [wsProvider]
   );
+
+  useEffect(() => {
+    getBalance(senderAddress);
+  }, [senderAddress, getBalance]);
 
   const makeTransfer = async () => {
     try {
@@ -77,7 +94,7 @@ const Landing = () => {
               console.log(
                 `Completed at block hash #${status.asInBlock.toString()}`
               );
-              getBalance();
+              getBalance(senderAddress);
               toast.info("Transaction completed. Updating Balance....");
               setButton((prev) => ({
                 ...prev,
